@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 import uuid
@@ -6,11 +7,11 @@ from typing import Any, AsyncIterator, Dict
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import Settings, get_settings
-from app.models import GenerateRequest
-from app.provider import OpenAIProvider, ProviderError
+from app.models import ChatCompletionRequest, GenerateRequest, ResponsesRequest
+from app.provider import GatewayProvider, ProviderError
 from app.rate_limit import InMemoryRateLimiter
 from app.webhooks import deliver_webhook, validate_webhook_url
 
@@ -22,8 +23,11 @@ logger = logging.getLogger("api-wrapper")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     app.state.http = httpx.AsyncClient(timeout=settings.request_timeout_seconds)
-    app.state.provider = OpenAIProvider(
-        app.state.http, settings.openai_api_key, settings.openai_base_url, settings.max_retries
+    app.state.provider = GatewayProvider(
+        app.state.http,
+        settings.gateway_api_key,
+        settings.gateway_base_url,
+        settings.max_retries,
     )
     app.state.limiter = InMemoryRateLimiter(
         settings.rate_limit_requests, settings.rate_limit_window_seconds
@@ -32,7 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.http.aclose()
 
 
-app = FastAPI(title="Production API Wrapper", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Production LLM Gateway", version="0.2.0", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -87,11 +91,78 @@ async def health() -> Dict[str, str]:
 
 @app.get("/readyz", tags=["operations"])
 async def ready(settings: Settings = Depends(get_settings)):
-    configured = bool(settings.openai_api_key)
+    configured = bool(settings.gateway_api_key and settings.allowed_model_aliases)
     return JSONResponse(
         status_code=200 if configured else 503,
-        content={"status": "ready" if configured else "not_ready", "provider_configured": configured},
+        content={
+            "status": "ready" if configured else "not_ready",
+            "gateway_configured": configured,
+            "model_aliases": sorted(settings.allowed_model_aliases),
+        },
     )
+
+
+def apply_policy(body: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
+    body["model"] = body.get("model") or settings.default_model_alias
+    if body["model"] not in settings.allowed_model_aliases:
+        raise HTTPException(422, "Requested model alias is not allowed")
+    output_limit = body.get("max_output_tokens") or body.get("max_completion_tokens") or body.get(
+        "max_tokens"
+    )
+    if output_limit and output_limit > settings.max_output_tokens:
+        raise HTTPException(422, f"Output is capped at {settings.max_output_tokens} tokens")
+    input_size = len(json.dumps(body.get("input", body.get("messages", [])), default=str))
+    if input_size > settings.max_input_characters:
+        raise HTTPException(413, "Input exceeds the gateway size limit")
+    return body
+
+
+def rate_limit_headers(request: Request, settings: Settings) -> Dict[str, str]:
+    remaining, reset = request.state.rate_limit
+    return {
+        "X-RateLimit-Limit": str(settings.rate_limit_requests),
+        "X-RateLimit-Remaining": str(remaining),
+        "X-RateLimit-Reset": str(reset),
+        "X-Model-Policy": "alias-only",
+    }
+
+
+@app.post("/v1/chat/completions", tags=["gateway"])
+async def chat_completions(
+    payload: ChatCompletionRequest,
+    request: Request,
+    _identity: str = Depends(authorize),
+    settings: Settings = Depends(get_settings),
+):
+    body = apply_policy(payload.model_dump(exclude_none=True), settings)
+    if payload.stream:
+        return StreamingResponse(
+            request.app.state.provider.stream("chat/completions", body, request.state.request_id),
+            media_type="text/event-stream",
+            headers=rate_limit_headers(request, settings),
+        )
+    result = await request.app.state.provider.create_chat_completion(
+        body, request.state.request_id
+    )
+    return JSONResponse(content=result, headers=rate_limit_headers(request, settings))
+
+
+@app.post("/v1/responses", tags=["gateway"])
+async def responses(
+    payload: ResponsesRequest,
+    request: Request,
+    _identity: str = Depends(authorize),
+    settings: Settings = Depends(get_settings),
+):
+    body = apply_policy(payload.model_dump(exclude_none=True), settings)
+    if payload.stream:
+        return StreamingResponse(
+            request.app.state.provider.stream("responses", body, request.state.request_id),
+            media_type="text/event-stream",
+            headers=rate_limit_headers(request, settings),
+        )
+    result = await request.app.state.provider.create_response(body, request.state.request_id)
+    return JSONResponse(content=result, headers=rate_limit_headers(request, settings))
 
 
 @app.post("/v1/generate", tags=["generation"])
@@ -100,7 +171,7 @@ async def generate(
     _identity: str = Depends(authorize), settings: Settings = Depends(get_settings),
 ):
     body = payload.model_dump(exclude_none=True, exclude={"webhook"})
-    body["model"] = payload.model or settings.openai_model
+    body = apply_policy(body, settings)
     result = await request.app.state.provider.create_response(body, request.state.request_id)
     if payload.webhook:
         url = str(payload.webhook.url)
@@ -114,9 +185,11 @@ async def generate(
             "type": "response.completed", "request_id": request.state.request_id,
             "data": result, "metadata": payload.webhook.metadata,
         }
-        tasks.add_task(deliver_webhook, request.app.state.http, url, event, settings.webhook_signing_secret)
-    remaining, reset = request.state.rate_limit
-    return JSONResponse(content=result, headers={
-        "X-RateLimit-Limit": str(settings.rate_limit_requests),
-        "X-RateLimit-Remaining": str(remaining), "X-RateLimit-Reset": str(reset),
-    })
+        tasks.add_task(
+            deliver_webhook,
+            request.app.state.http,
+            url,
+            event,
+            settings.webhook_signing_secret,
+        )
+    return JSONResponse(content=result, headers=rate_limit_headers(request, settings))
