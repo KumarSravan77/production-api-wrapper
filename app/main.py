@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.config import Settings, get_settings
 from app.models import ChatCompletionRequest, GenerateRequest, ResponsesRequest
 from app.provider import GatewayProvider, ProviderError
-from app.rate_limit import InMemoryRateLimiter
+from app.rate_limit import InMemoryRateLimiter, RedisRateLimiter
+from app.redaction import redact_sensitive
 from app.webhooks import deliver_webhook, validate_webhook_url
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -29,11 +30,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.gateway_base_url,
         settings.max_retries,
     )
-    app.state.limiter = InMemoryRateLimiter(
-        settings.rate_limit_requests, settings.rate_limit_window_seconds
+    app.state.limiter = (
+        RedisRateLimiter(
+            settings.redis_url,
+            settings.rate_limit_requests,
+            settings.rate_limit_window_seconds,
+        )
+        if settings.redis_url
+        else InMemoryRateLimiter(settings.rate_limit_requests, settings.rate_limit_window_seconds)
     )
     yield
     await app.state.http.aclose()
+    if hasattr(app.state.limiter, "close"):
+        await app.state.limiter.close()
 
 
 app = FastAPI(title="Production LLM Gateway", version="0.2.0", lifespan=lifespan)
@@ -124,7 +133,14 @@ def rate_limit_headers(request: Request, settings: Settings) -> Dict[str, str]:
         "X-RateLimit-Remaining": str(remaining),
         "X-RateLimit-Reset": str(reset),
         "X-Model-Policy": "alias-only",
+        "X-PII-Redactions": str(getattr(request.state, "pii_redactions", 0)),
     }
+
+
+def enforce_request_policy(payload: Any, request: Request, settings: Settings) -> Dict[str, Any]:
+    body, redactions = redact_sensitive(payload.model_dump(exclude_none=True))
+    request.state.pii_redactions = redactions
+    return apply_policy(body, settings)
 
 
 @app.post("/v1/chat/completions", tags=["gateway"])
@@ -134,7 +150,7 @@ async def chat_completions(
     _identity: str = Depends(authorize),
     settings: Settings = Depends(get_settings),
 ):
-    body = apply_policy(payload.model_dump(exclude_none=True), settings)
+    body = enforce_request_policy(payload, request, settings)
     if payload.stream:
         return StreamingResponse(
             request.app.state.provider.stream("chat/completions", body, request.state.request_id),
@@ -154,7 +170,7 @@ async def responses(
     _identity: str = Depends(authorize),
     settings: Settings = Depends(get_settings),
 ):
-    body = apply_policy(payload.model_dump(exclude_none=True), settings)
+    body = enforce_request_policy(payload, request, settings)
     if payload.stream:
         return StreamingResponse(
             request.app.state.provider.stream("responses", body, request.state.request_id),
@@ -170,7 +186,10 @@ async def generate(
     payload: GenerateRequest, request: Request, tasks: BackgroundTasks,
     _identity: str = Depends(authorize), settings: Settings = Depends(get_settings),
 ):
-    body = payload.model_dump(exclude_none=True, exclude={"webhook"})
+    body, redactions = redact_sensitive(
+        payload.model_dump(exclude_none=True, exclude={"webhook"})
+    )
+    request.state.pii_redactions = redactions
     body = apply_policy(body, settings)
     result = await request.app.state.provider.create_response(body, request.state.request_id)
     if payload.webhook:

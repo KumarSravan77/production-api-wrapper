@@ -30,3 +30,27 @@ class InMemoryRateLimiter:
             return allowed, max(0, self.limit - window.count), max(
                 1, int(self.window_seconds - (now - window.started_at))
             )
+
+
+class RedisRateLimiter:
+    """Atomic fixed-window limiter shared by every gateway replica."""
+
+    def __init__(self, redis_url: str, limit: int, window_seconds: int) -> None:
+        from redis.asyncio import from_url
+
+        self.redis = from_url(redis_url, encoding="utf-8", decode_responses=True)
+        self.limit = limit
+        self.window_seconds = window_seconds
+
+    async def check(self, key: str) -> Tuple[bool, int, int]:
+        bucket = int(time.time()) // self.window_seconds
+        redis_key = f"gateway:rate:{key}:{bucket}"
+        async with self.redis.pipeline(transaction=True) as transaction:
+            transaction.incr(redis_key)
+            transaction.expire(redis_key, self.window_seconds + 1)
+            count, _ = await transaction.execute()
+        reset = max(1, self.window_seconds - (int(time.time()) % self.window_seconds))
+        return count <= self.limit, max(0, self.limit - count), reset
+
+    async def close(self) -> None:
+        await self.redis.aclose()

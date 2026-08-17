@@ -6,6 +6,9 @@ services:
       - "8000:8000"
     depends_on:
       - litellm
+      - redis
+    environment:
+      REDIS_URL: redis://redis:6379/1
 
   litellm:
     image: ghcr.io/berriai/litellm:main-stable

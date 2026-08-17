@@ -48,7 +48,10 @@ def test_rate_limit(client):
 
 
 class FakeProvider:
+    last_payload = None
+
     async def create_chat_completion(self, payload, request_id):
+        self.last_payload = payload
         return {"id": "chatcmpl_test", "model": payload["model"], "choices": []}
 
     async def create_response(self, payload, request_id):
@@ -60,7 +63,8 @@ class FakeProvider:
 
 
 def test_chat_completion_uses_default_policy_alias(client):
-    client.app.state.provider = FakeProvider()
+    provider = FakeProvider()
+    client.app.state.provider = provider
     response = client.post(
         "/v1/chat/completions",
         headers={"X-API-Key": "test-key"},
@@ -69,6 +73,19 @@ def test_chat_completion_uses_default_policy_alias(client):
     assert response.status_code == 200
     assert response.json()["model"] == "balanced"
     assert response.headers["x-model-policy"] == "alias-only"
+
+
+def test_sensitive_input_is_redacted_before_provider_call(client):
+    provider = FakeProvider()
+    client.app.state.provider = provider
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"X-API-Key": "test-key"},
+        json={"messages": [{"role": "user", "content": "Email buyer@example.ca"}]},
+    )
+    assert response.status_code == 200
+    assert provider.last_payload["messages"][0]["content"] == "Email [REDACTED]"
+    assert response.headers["x-pii-redactions"] == "1"
 
 
 def test_direct_provider_model_is_rejected(client):

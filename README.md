@@ -35,7 +35,8 @@ which prevents clients from bypassing reviewed routing and data-handling policy.
 - OpenAI-compatible `POST /v1/chat/completions` and `POST /v1/responses`
 - Server-sent event streaming for both endpoints
 - Backward-compatible `POST /v1/generate` with signed HTTPS webhooks
-- Wrapper API-key authentication and per-client rate limiting
+- Wrapper API-key authentication and Redis-backed distributed per-client rate limiting
+- Pre-provider email, payment-card-like, and Canadian SIN-like data redaction
 - Alias-only model policy and configurable input/output limits
 - Request IDs, metadata-only access logs, normalized errors, timeouts, and
   retries limited to transient upstream failures
@@ -127,8 +128,7 @@ integration test against a development LiteLLM virtual key before deployment.
 
 ## Production follow-ups
 
-The FastAPI edge still uses a single-process limiter; replace it with Redis before
-running multiple replicas. Add a durable webhook outbox for guaranteed delivery,
+Add a durable webhook outbox for guaranteed delivery,
 an authenticated metrics endpoint, distributed traces, per-tenant cache policy,
 and deployment-specific guardrails. Pin the LiteLLM container by immutable digest
 after validation rather than following a floating tag.
