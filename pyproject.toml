@@ -5,8 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "production-api-wrapper"
 version = "0.2.0"
-requires-python = ">=3.9"
-dependencies = ["fastapi>=0.115,<1", "httpx>=0.27,<1", "pydantic>=2.8,<3", "redis>=5,<7", "uvicorn[standard]>=0.30,<1"]
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
+  "pydantic>=2.8,<3",
+  "redis>=5,<7",
+  "security-guardrail-middleware @ https://github.com/KumarSravan77/security-guardrail-middleware/archive/9ace6dc3b107c6462ce5dd3952ee4b7d5623ba9b.tar.gz",
+  "uvicorn[standard]>=0.30,<1",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "ruff>=0.8,<1"]

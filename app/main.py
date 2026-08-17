@@ -8,12 +8,12 @@ from typing import Any, AsyncIterator, Dict
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from guardrails import GuardrailMiddleware
 
 from app.config import Settings, get_settings
 from app.models import ChatCompletionRequest, GenerateRequest, ResponsesRequest
 from app.provider import GatewayProvider, ProviderError
 from app.rate_limit import InMemoryRateLimiter, RedisRateLimiter
-from app.redaction import redact_sensitive
 from app.webhooks import deliver_webhook, validate_webhook_url
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Production LLM Gateway", version="0.2.0", lifespan=lifespan)
+app.add_middleware(GuardrailMiddleware)
 
 
 @app.middleware("http")
@@ -133,14 +134,12 @@ def rate_limit_headers(request: Request, settings: Settings) -> Dict[str, str]:
         "X-RateLimit-Remaining": str(remaining),
         "X-RateLimit-Reset": str(reset),
         "X-Model-Policy": "alias-only",
-        "X-PII-Redactions": str(getattr(request.state, "pii_redactions", 0)),
+        "X-Guardrails": "enforced",
     }
 
 
 def enforce_request_policy(payload: Any, request: Request, settings: Settings) -> Dict[str, Any]:
-    body, redactions = redact_sensitive(payload.model_dump(exclude_none=True))
-    request.state.pii_redactions = redactions
-    return apply_policy(body, settings)
+    return apply_policy(payload.model_dump(exclude_none=True), settings)
 
 
 @app.post("/v1/chat/completions", tags=["gateway"])
@@ -186,10 +185,7 @@ async def generate(
     payload: GenerateRequest, request: Request, tasks: BackgroundTasks,
     _identity: str = Depends(authorize), settings: Settings = Depends(get_settings),
 ):
-    body, redactions = redact_sensitive(
-        payload.model_dump(exclude_none=True, exclude={"webhook"})
-    )
-    request.state.pii_redactions = redactions
+    body = payload.model_dump(exclude_none=True, exclude={"webhook"})
     body = apply_policy(body, settings)
     result = await request.app.state.provider.create_response(body, request.state.request_id)
     if payload.webhook:

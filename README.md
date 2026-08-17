@@ -36,7 +36,10 @@ which prevents clients from bypassing reviewed routing and data-handling policy.
 - Server-sent event streaming for both endpoints
 - Backward-compatible `POST /v1/generate` with signed HTTPS webhooks
 - Wrapper API-key authentication and Redis-backed distributed per-client rate limiting
-- Pre-provider email, payment-card-like, and Canadian SIN-like data redaction
+- Shared, version-pinned production guardrails on every JSON request and response
+- Prompt-injection and harmful-instruction blocking before provider invocation
+- Canadian PII, payment-card, credential, and secret protection
+- Streaming-safe enforcement: input is scanned while SSE output remains unbuffered
 - Alias-only model policy and configurable input/output limits
 - Request IDs, metadata-only access logs, normalized errors, timeouts, and
   retries limited to transient upstream failures
