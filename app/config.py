@@ -23,6 +23,7 @@ class Settings:
     wrapper_api_keys: FrozenSet[str]
     rate_limit_requests: int
     rate_limit_window_seconds: int
+    redis_url: str
     request_timeout_seconds: float
     max_retries: int
     webhook_signing_secret: str
@@ -52,6 +53,7 @@ def get_settings() -> Settings:
         wrapper_api_keys=keys,
         rate_limit_requests=integer("RATE_LIMIT_REQUESTS", 60, 1),
         rate_limit_window_seconds=integer("RATE_LIMIT_WINDOW_SECONDS", 60, 1),
+        redis_url=os.getenv("REDIS_URL", ""),
         request_timeout_seconds=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "60")),
         max_retries=integer("MAX_RETRIES", 2),
         webhook_signing_secret=os.getenv("WEBHOOK_SIGNING_SECRET", ""),
